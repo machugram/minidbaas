@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+*.db
+
+# Claude Code session/local state — machine-specific, not project config.
+.claude/settings.local.json
+.claude/scheduled_tasks.lock

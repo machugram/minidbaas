@@ -1,0 +1,43 @@
+# Control plane only. Tenant Postgres instances are created as *sibling*
+# containers on the host Docker daemon by the provisioner — they are not defined
+# here (that is the whole point of the platform).
+
+services:
+  metadata-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: mdbaas
+      POSTGRES_PASSWORD: mdbaas
+      POSTGRES_DB: mdbaas
+    volumes:
+      - metadata-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mdbaas"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    depends_on:
+      metadata-db:
+        condition: service_healthy
+    environment:
+      MDBAAS_DATABASE_URL: postgresql+psycopg://mdbaas:mdbaas@metadata-db:5432/mdbaas
+      # Provide via a .env file or your shell — never commit a real key.
+      MDBAAS_CREDENTIAL_ENCRYPTION_KEY: ${MDBAAS_CREDENTIAL_ENCRYPTION_KEY}
+    ports:
+      - "${MDBAAS_HOST_PORT:-8001}:8000"
+    volumes:
+      # The Docker socket is root-equivalent (design-review 1.1). For the MVP this
+      # is the accepted trust boundary; the hardening path is a docker-socket-proxy
+      # in front of this mount.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Shared backups volume, also mounted into every managed instance at /backups.
+      - mdbaas-backups:/backups
+
+volumes:
+  metadata-data:
+  mdbaas-backups:
+    # Force the exact name the provisioner references (no compose project prefix).
+    name: mdbaas-backups
