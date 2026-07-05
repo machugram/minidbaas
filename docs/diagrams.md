@@ -231,7 +231,56 @@ erDiagram
 
 ---
 
-## 7. Deployment (MVP, single host)
+## 7. Provisioning workflow (end-to-end, with desired-state reconciliation)
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API as API<br/>(desired-state<br/>writer)
+    participant MetaDB as Metadata DB<br/>(source of truth)
+    participant Worker as Worker<br/>(job poller)
+    participant Provisioner as Provisioner<br/>(Docker SDK)
+    participant Docker as Docker<br/>daemon
+
+    Client->>API: POST /v1/instances<br/>(create my-db)
+    activate API
+    API->>API: validate<br/>authz + quota
+    API->>MetaDB: BEGIN<br/>INSERT instance<br/>(desired=READY)<br/>INSERT job<br/>(PROVISION)
+    API->>MetaDB: COMMIT
+    API-->>Client: 202 Accepted<br/>instance id + status
+    deactivate API
+
+    Note over Worker: polling every 2s...
+    Worker->>MetaDB: SELECT * FROM jobs<br/>WHERE state=QUEUED<br/>LIMIT 1<br/>FOR UPDATE SKIP LOCKED
+    activate Worker
+    MetaDB-->>Worker: job row
+    Worker->>Worker: idempotent<br/>handle_provision()
+    Worker->>Provisioner: create(spec)
+    activate Provisioner
+    Provisioner->>Docker: POST /containers/create<br/>with volume + labels
+    Docker-->>Provisioner: container_id
+    Provisioner->>Docker: POST /containers/{id}/start
+    Docker-->>Provisioner: running
+    Provisioner->>Docker: healthcheck loop<br/>pg_isready
+    Docker-->>Provisioner: healthy
+    Provisioner-->>Worker: Provisioned(id)
+    deactivate Provisioner
+    Worker->>MetaDB: UPDATE instance<br/>SET observed=READY<br/>UPDATE job<br/>SET state=DONE
+    deactivate Worker
+
+    Client->>API: GET /v1/instances/{id}/status
+    API->>MetaDB: SELECT instance
+    MetaDB-->>API: instance(observed=READY)
+    API-->>Client: { status: "ready",<br/>connection: {...} }
+    Client->>Docker: psql -h 127.0.0.1<br/>-p 15001
+    Docker-->>Client: ready for queries
+```
+
+**Key insight:** The client gets a quick `202` response while the actual provisioning happens async. The reconciler converges `observed_state` toward `desired_state` independently, making the system resilient to crashes and enabling job retries (ADR-003).
+
+---
+
+## 8. Deployment (MVP, single host)
 
 ```mermaid
 flowchart TB
