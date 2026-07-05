@@ -37,6 +37,65 @@ class QuotaUsage(BaseModel):
     storage_gb: int
 
 
+TeamRole = Literal["owner", "admin", "member", "readonly"]
+
+
+class MembershipCreate(BaseModel):
+    principal_id: str
+    role: TeamRole = "member"
+
+
+class MembershipOut(BaseModel):
+    principal_id: str
+    principal_name: str
+    role: str
+
+
+# --- Principals (API identities) -------------------------------------------- #
+class PrincipalCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    is_platform_admin: bool = False
+
+
+class PrincipalOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    name: str
+    is_platform_admin: bool
+
+
+class PrincipalCreatedSecret(PrincipalOut):
+    """Returned once, at create time — carries the bearer API key (mirrors the
+    one-time-reveal pattern used for instance credentials, ADR-005)."""
+
+    api_key: str
+
+
+class MyTeam(BaseModel):
+    team_id: str
+    team_name: str
+    role: str
+
+
+class MeOut(BaseModel):
+    id: str
+    name: str
+    is_platform_admin: bool
+    teams: list[MyTeam]
+
+
+# --- Audit ------------------------------------------------------------------ #
+class AuditLogOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    actor_id: str | None
+    team_id: str | None
+    action: str
+    target: str
+    detail: dict | None
+    at: datetime
+
+
 # --- Instances ------------------------------------------------------------- #
 class InstanceCreate(BaseModel):
     team_id: str

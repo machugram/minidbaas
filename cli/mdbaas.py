@@ -16,9 +16,11 @@ app = typer.Typer(help="Mini-DBaaS CLI", no_args_is_help=True)
 teams = typer.Typer(help="Team administration")
 instances = typer.Typer(help="Instance lifecycle")
 backups = typer.Typer(help="Backups")
+audit = typer.Typer(help="Audit trail")
 app.add_typer(teams, name="teams")
 app.add_typer(instances, name="instances")
 app.add_typer(backups, name="backups")
+app.add_typer(audit, name="audit")
 
 
 def _base() -> str:
@@ -49,10 +51,47 @@ def health() -> None:
         _show(c.get("/health"))
 
 
+@app.command()
+def whoami() -> None:
+    """Show the current principal and which teams/roles the API key grants."""
+    with _client() as c:
+        _show(c.get("/v1/me"))
+
+
 @teams.command("create")
 def team_create(name: str, max_instances: int = 10) -> None:
     with _client() as c:
         _show(c.post("/v1/teams", json={"name": name, "max_instances": max_instances}))
+
+
+@teams.command("list")
+def team_list() -> None:
+    with _client() as c:
+        _show(c.get("/v1/teams"))
+
+
+@teams.command("get")
+def team_get(team_id: str) -> None:
+    with _client() as c:
+        _show(c.get(f"/v1/teams/{team_id}"))
+
+
+@teams.command("usage")
+def team_usage(team_id: str) -> None:
+    with _client() as c:
+        _show(c.get(f"/v1/teams/{team_id}/usage"))
+
+
+@teams.command("members")
+def team_members(team_id: str) -> None:
+    with _client() as c:
+        _show(c.get(f"/v1/teams/{team_id}/members"))
+
+
+@teams.command("add-member")
+def team_add_member(team_id: str, principal_id: str, role: str = "member") -> None:
+    with _client() as c:
+        _show(c.post(f"/v1/teams/{team_id}/members", json={"principal_id": principal_id, "role": role}))
 
 
 @instances.command("create")
@@ -71,10 +110,23 @@ def instance_list(team: str | None = None, tag: str | None = None) -> None:
         _show(c.get("/v1/instances", params=params))
 
 
+@instances.command("get")
+def instance_get(instance_id: str) -> None:
+    with _client() as c:
+        _show(c.get(f"/v1/instances/{instance_id}"))
+
+
 @instances.command("status")
 def instance_status(instance_id: str) -> None:
     with _client() as c:
         _show(c.get(f"/v1/instances/{instance_id}/status"))
+
+
+@instances.command("jobs")
+def instance_jobs(instance_id: str) -> None:
+    """Job queue history for this instance — useful while testing convergence."""
+    with _client() as c:
+        _show(c.get(f"/v1/instances/{instance_id}/jobs"))
 
 
 @instances.command("delete")
@@ -100,6 +152,13 @@ def backup_create(instance_id: str) -> None:
 def backup_list(instance_id: str) -> None:
     with _client() as c:
         _show(c.get(f"/v1/instances/{instance_id}/backups"))
+
+
+@audit.command("list")
+def audit_list(team: str | None = None, limit: int = 100) -> None:
+    params = {k: v for k, v in {"team_id": team, "limit": limit}.items() if v}
+    with _client() as c:
+        _show(c.get("/v1/audit", params=params))
 
 
 if __name__ == "__main__":

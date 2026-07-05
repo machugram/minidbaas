@@ -138,20 +138,32 @@ Core tables:
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/v1/teams` | create team (admin) |
+| POST | `/v1/teams` | create team (admin; creator is enrolled as owner) |
+| GET | `/v1/teams` | list teams (scoped to caller; all for admin) |
+| GET | `/v1/teams/{id}` | team detail |
+| GET | `/v1/teams/{id}/usage` | current quota consumption |
+| GET | `/v1/teams/{id}/members` | list members + roles |
+| POST | `/v1/teams/{id}/members` | add a principal to the team (admin+) |
+| DELETE | `/v1/teams/{id}/members/{principal_id}` | remove a member (admin+) |
+| POST | `/v1/principals` | create an API identity + one-time key (platform admin) |
+| GET | `/v1/me` | current principal + team memberships/roles |
 | POST | `/v1/instances` | provision instance (async → 202) |
 | GET | `/v1/instances` | list (scoped to caller's teams; filter by tag/team) |
 | GET | `/v1/instances/{id}` | detail + live status |
 | PATCH | `/v1/instances/{id}` | resize / retag / set expiry |
 | DELETE | `/v1/instances/{id}` | deprovision (optional final backup) |
+| POST | `/v1/instances/{id}/resize` | resize cpu/memory (async → 202) |
 | POST | `/v1/instances/{id}/patch` | patch to new engine version |
+| GET | `/v1/instances/{id}/status` | poll provisioning/patch job state |
+| GET | `/v1/instances/{id}/jobs` | job queue history for this instance |
 | POST | `/v1/instances/{id}/users` | create managed DB role |
+| GET | `/v1/instances/{id}/users` | list managed DB roles |
 | DELETE | `/v1/instances/{id}/users/{name}` | drop role |
-| POST | `/v1/instances/{id}/credentials:rotate` | rotate superuser password |
+| POST | `/v1/instances/{id}/credentials/rotate` | rotate superuser password |
 | POST | `/v1/instances/{id}/backups` | trigger manual backup |
 | GET | `/v1/instances/{id}/backups` | list backups |
 | POST | `/v1/instances/{id}/restore` | restore from a backup |
-| GET | `/v1/instances/{id}/status` | poll provisioning/patch job state |
+| GET | `/v1/audit` | audit trail (scoped to caller's teams; filter by team) |
 
 ---
 
