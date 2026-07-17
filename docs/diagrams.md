@@ -139,7 +139,7 @@ stateDiagram-v2
     READY --> EXPIRED: expires_at reached
     READY --> DELETING: delete
     EXPIRED --> DELETING: reaper (post grace + final backup)
-    FAILED --> PROVISIONING: reconciler retry
+    FAILED --> PROVISIONING: POST /retry (manual, re-runs last job type)
     DELETING --> DELETED
     DELETED --> [*]
 ```

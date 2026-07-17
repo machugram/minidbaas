@@ -40,6 +40,14 @@ def test_full_lifecycle(client, admin, fake_prov):
     status = client.get(f"/v1/instances/{instance_id}/status", headers=admin["headers"]).json()
     assert status["observed_state"] == "ready"
 
+    # Connection info must survive past the one-time create response — only the
+    # password is one-time-reveal (previously GET responses omitted it entirely).
+    fetched = client.get(f"/v1/instances/{instance_id}", headers=admin["headers"]).json()
+    assert fetched["connection"] == body["connection"]
+    assert "password" not in fetched
+    listed = client.get("/v1/instances", headers=admin["headers"]).json()
+    assert listed[0]["connection"]["port"] == body["connection"]["port"]
+
     backup = client.post(f"/v1/instances/{instance_id}/backups", json={}, headers=admin["headers"])
     assert backup.status_code == 201, backup.text
     assert backup.json()["status"] == "ok"

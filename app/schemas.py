@@ -133,6 +133,10 @@ class Connection(BaseModel):
 
 
 class InstanceOut(BaseModel):
+    """The standing wire representation of an instance. ``connection`` carries
+    host/port/database/username — none of that is secret, so unlike the password
+    it is safe (and useful) to return on every read, not just at create time."""
+
     model_config = ConfigDict(from_attributes=True)
     id: str
     team_id: str
@@ -143,15 +147,18 @@ class InstanceOut(BaseModel):
     size: str
     desired_state: str
     observed_state: str
+    last_error: str | None
     tags: dict
     expires_at: datetime | None
     created_at: datetime
+    connection: Connection
 
 
 class InstanceCreatedSecret(InstanceOut):
-    """Returned once, at create time — carries the superuser password (ADR-005)."""
+    """Returned once, at create time — carries the superuser password (ADR-005).
+    Everything else in ``InstanceOut``, including ``connection``, is available on
+    every later GET too."""
 
-    connection: Connection
     password: str
 
 

@@ -154,6 +154,7 @@ Core tables:
 | DELETE | `/v1/instances/{id}` | deprovision (optional final backup) |
 | POST | `/v1/instances/{id}/resize` | resize cpu/memory (async → 202) |
 | POST | `/v1/instances/{id}/patch` | patch to new engine version |
+| POST | `/v1/instances/{id}/retry` | recover a FAILED instance (re-run last failed job) |
 | GET | `/v1/instances/{id}/status` | poll provisioning/patch job state |
 | GET | `/v1/instances/{id}/jobs` | job queue history for this instance |
 | POST | `/v1/instances/{id}/users` | create managed DB role |

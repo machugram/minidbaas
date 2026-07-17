@@ -135,6 +135,13 @@ def instance_delete(instance_id: str, final_backup: bool = True) -> None:
         _show(c.delete(f"/v1/instances/{instance_id}", params={"final_backup": final_backup}))
 
 
+@instances.command("retry")
+def instance_retry(instance_id: str) -> None:
+    """Recover an instance stuck in 'failed' (re-runs whatever job last failed)."""
+    with _client() as c:
+        _show(c.post(f"/v1/instances/{instance_id}/retry"))
+
+
 @instances.command("rotate")
 def instance_rotate(instance_id: str) -> None:
     """Rotate the superuser credential."""

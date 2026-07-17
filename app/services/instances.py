@@ -19,6 +19,7 @@ from app.models import (
     IdempotencyKey,
     Instance,
     InstanceState,
+    Job,
     JobType,
     Principal,
     Role,
@@ -200,6 +201,36 @@ def delete_instance(session: Session, principal: Principal, instance_id: str, *,
     jobs.enqueue(session, JobType.DELETE, instance_id, {"final_backup": final_backup})
     audit.record(session, actor_id=principal.id, team_id=instance.team_id,
                  action="instance.delete", target=instance_id)
+
+
+def retry_instance(session: Session, principal: Principal, instance_id: str) -> Instance:
+    """Recover an instance stuck in FAILED.
+
+    Exhausting a job's retries flips ``observed_state`` to FAILED (worker._STATE_CHANGING)
+    but the dead-lettered job itself is never picked up again — nothing else in the
+    system will move the instance forward. Without this, the only recovery was
+    delete-and-recreate, even for a transient failure like a port collision.
+
+    Re-runs whatever job type last touched the instance (PROVISION, PATCH, RESIZE,
+    ...) with its original payload, so a failed patch retries the patch rather than
+    silently falling back to re-provisioning.
+    """
+    instance = get_instance(session, principal, instance_id)
+    require_role(session, principal, instance.team_id, Role.ADMIN)
+    if instance.observed_state != InstanceState.FAILED.value:
+        raise Conflict(f"instance is '{instance.observed_state}', must be 'failed' to retry")
+
+    last_job = session.scalars(
+        select(Job).where(Job.instance_id == instance_id).order_by(Job.created_at.desc()).limit(1)
+    ).first()
+    job_type = JobType(last_job.type) if last_job else JobType.PROVISION
+    payload = last_job.payload if last_job else {}
+
+    instance.last_error = None
+    jobs.enqueue_once(session, job_type, instance_id, payload)
+    audit.record(session, actor_id=principal.id, team_id=instance.team_id,
+                 action="instance.retry", target=instance_id, detail={"job_type": job_type.value})
+    return instance
 
 
 def _require_ready(instance: Instance) -> None:
