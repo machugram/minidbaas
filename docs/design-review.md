@@ -90,6 +90,28 @@ fire.
   Roadmap: a dedicated worker (arq/Celery/RQ + Redis) or k8s CronJobs. Covered in
   [ADR-006](adr/ADR-006-in-process-scheduler.md).
 
+### 2.5 🔴 Drift detection treats "present" as "healthy" — a stopped container is invisible
+Observed live: a container was stopped outside the platform (host/Docker restart
+with no restart policy engaging), yet the instance stayed `observed_state=READY`
+indefinitely — nobody, human or reconciler, ever noticed. The root cause is in
+`reconcile()` ([reconciler.py](../app/lifecycle/reconciler.py)): it only checks
+`instance.id in reality`, and `reality` comes from `list_managed()`, which
+intentionally lists containers `all=True` (stopped included) — a deliberate choice,
+because both orphan-GC and the two-phase-expiry `STOPPED` state (DR-7) need a
+stopped-but-labelled container to still count as "present" so it isn't destroyed or
+mistaken for missing. That correct choice has a side effect: a container that stops
+*unexpectedly* while `observed_state=READY` is just as invisible as one that stopped
+*intentionally*, and the platform reports a database as healthy while it is actually
+down.
+- **Recommendation:** for instances where `desired_state=READY`,
+  `observed_state=READY`, and the container is *present*, additionally check
+  `provisioner.status(instance.id) == RUNNING` (one extra call per READY instance
+  per tick — cheap at the ≤50-instance MVP scale in NFR-4). If not running, treat it
+  as drift: `provisioner.start()` first, and if it doesn't come back healthy,
+  escalate to the same re-provision path as a missing container. This is a
+  reconciler-logic change only — `list_managed()`/the orphan-GC contract stays
+  correct as-is.
+
 ---
 
 ## 3. Data durability & backups
@@ -206,20 +228,25 @@ Phase 4), so they are part of building the MVP, not a follow-up.
 7. Two-phase **expiry (stop → grace → destroy + final backup)** (§5.3).
 8. Honest docs on **storage-quota softness** and **isolation level** (§4.1, §1.2).
 
-**Fast-follow (v1.1)**
-9. **Off-host backup storage** (S3/MinIO) + restore verification job (§3.1, §3.3).
-10. **docker-socket-proxy** + rootless daemon + hardened container flags (§1.1, §1.2).
-11. Host-level **admission/backpressure** check (§4.2).
-12. Observability pack: health, `postgres_exporter`, backup/job metrics (§5.2).
+**Fast-follow (v1.1)** — item 9 was found *after* the MVP shipped (observed live
+while operating the system), not part of the original DR-1..8 set; the rest are
+unchanged from the original review.
+9. **Reconciler must check `RUNNING`, not just presence** (§2.5) — cheap (one
+   `status()` call per READY instance per tick) and closes a real false-positive:
+   today a stopped-but-labelled container reports as healthy indefinitely.
+10. **Off-host backup storage** (S3/MinIO) + restore verification job (§3.1, §3.3).
+11. **docker-socket-proxy** + rootless daemon + hardened container flags (§1.1, §1.2).
+12. Host-level **admission/backpressure** check (§4.2).
+13. Observability pack: health, `postgres_exporter`, backup/job metrics (§5.2).
 
 **Roadmap (v2+)**
-13. **Kubernetes provisioner** behind the existing Protocol (the driver
+14. **Kubernetes provisioner** behind the existing Protocol (the driver
     abstraction is what makes this cheap — [ADR-002](adr/ADR-002-provisioner-driver-abstraction.md)).
-14. Shared **pgbouncer/SNI proxy** replacing port-per-instance, with TLS (§1.4).
-15. **PITR** via WAL archiving (`pgBackRest`/`wal-g`) (§3.2).
-16. Envelope encryption via Vault/KMS (§1.3).
-17. Real tenant isolation (per-team networks, gVisor/Kata, or VM-per-team) (§1.2).
-18. Multi-engine (MySQL) via a second driver; HA/replicas for tenant DBs.
+15. Shared **pgbouncer/SNI proxy** replacing port-per-instance, with TLS (§1.4).
+16. **PITR** via WAL archiving (`pgBackRest`/`wal-g`) (§3.2).
+17. Envelope encryption via Vault/KMS (§1.3).
+18. Real tenant isolation (per-team networks, gVisor/Kata, or VM-per-team) (§1.2).
+19. Multi-engine (MySQL) via a second driver; HA/replicas for tenant DBs.
 
 ---
 
@@ -232,6 +259,8 @@ keeping:
   downtime — the single best structural choice ([ADR-001](adr/ADR-001-control-plane-data-plane-split.md)).
 - **Desired-state + reconciler** instead of imperative do-it-now calls — makes
   the system crash-safe and self-healing ([ADR-003](adr/ADR-003-desired-state-reconciler.md)).
+  Self-healing today covers *missing* containers; §2.5 is the gap where a
+  *stopped-but-present* one still slips through.
 - **Provisioner Protocol** isolating Docker so a k8s driver is additive, not a
   rewrite ([ADR-002](adr/ADR-002-provisioner-driver-abstraction.md)).
 - **Patch = image swap on a persistent volume** — honest, simple, and correct
