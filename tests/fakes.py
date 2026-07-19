@@ -10,12 +10,18 @@ from app.provisioner import ExecResult, InstanceSpec, Provisioned, RuntimeStatus
 class FakeProvisioner:
     def __init__(self) -> None:
         self.instances: dict[str, dict] = {}
+        # Instance ids in here raise once on the next destroy() call, then clear
+        # themselves — used to simulate a transient Docker API error.
+        self.fail_destroy_once: set[str] = set()
 
     def create(self, spec: InstanceSpec) -> Provisioned:
         self.instances[spec.instance_id] = {"running": True, "image": spec.image}
         return Provisioned(container_id=f"fake-{spec.instance_id}")
 
     def destroy(self, instance_id: str) -> None:
+        if instance_id in self.fail_destroy_once:
+            self.fail_destroy_once.discard(instance_id)
+            raise RuntimeError("simulated transient destroy failure")
         self.instances.pop(instance_id, None)
 
     def stop(self, instance_id: str) -> None:

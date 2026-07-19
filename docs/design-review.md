@@ -90,7 +90,7 @@ fire.
   Roadmap: a dedicated worker (arq/Celery/RQ + Redis) or k8s CronJobs. Covered in
   [ADR-006](adr/ADR-006-in-process-scheduler.md).
 
-### 2.5 🔴 Drift detection treats "present" as "healthy" — a stopped container is invisible
+### 2.5 ✅ Fixed — Drift detection treats "present" as "healthy" — a stopped container is invisible
 Observed live: a container was stopped outside the platform (host/Docker restart
 with no restart policy engaging), yet the instance stayed `observed_state=READY`
 indefinitely — nobody, human or reconciler, ever noticed. The root cause is in
@@ -111,6 +111,45 @@ down.
   escalate to the same re-provision path as a missing container. This is a
   reconciler-logic change only — `list_managed()`/the orphan-GC contract stays
   correct as-is.
+- **Fixed:** `reconcile()` now checks `provisioner.status()` for every
+  READY-and-present instance and re-enqueues a `PROVISION` job (idempotent —
+  `DockerProvisioner.create()` already starts an existing-but-stopped container
+  rather than erroring, so no new job type was needed) whenever it isn't
+  `RUNNING`. Covered by
+  [tests/test_reconciler.py](../tests/test_reconciler.py).
+
+### 2.6 ✅ Fixed — Orphan-GC failure could roll back unrelated drift repair in the same tick
+Found while writing the deterministic moving-parts model
+([finding 3](moving-parts-model.md#f-findings-appendix--contradictionsgaps-found-while-deriving-this-model)):
+`reconcile()`'s orphan loop called `provisioner.destroy()` with no error
+handling, unlike every other destructive path in the system which goes through
+the job queue's retry/backoff. Since the whole tick runs in one DB session, an
+exception there propagated up to the scheduler's `session_scope()`, which
+rolled back the *entire* transaction — including any legitimate drift-repair
+jobs `enqueue_once`'d earlier in the same pass for unrelated instances. A
+transient Docker error while reclaiming one orphan could silently discard real
+repair work for a different, healthy instance.
+- **Fixed:** each orphan destroy is now wrapped in its own `try/except`; a
+  failure is logged and the orphan is simply retried on the next reconcile pass
+  (still present in `list_managed()`, so nothing is lost), without touching any
+  other instance's work in the same tick.
+
+### 2.7 ✅ Fixed — Synchronous credential/DB-user operations had no retry at all
+Also found while building the moving-parts model
+([finding 2](moving-parts-model.md#f-findings-appendix--contradictionsgaps-found-while-deriving-this-model)):
+credential rotation and managed DB-user create/drop are the only
+instance-touching mutations that run synchronously in the request thread
+instead of through the job queue — they have to, since the response carries a
+one-time secret that doesn't exist until the SQL has actually run. That means
+they never got the job queue's automatic retry-with-backoff (DR-3); a single
+transient `docker exec` failure (e.g. the container briefly restarting) failed
+the whole request immediately.
+- **Fixed:** `services/pgops.py:psql()` (the shared helper behind both
+  `services/credentials.py` and `services/db_users.py`) now retries up to 3
+  times with a 1s delay between attempts before giving up. This is
+  deliberately not converted to async/job-queue-backed — that would break the
+  one-time-secret-reveal contract — just given the same "don't fail on one
+  blip" tolerance every other mutation already has.
 
 ---
 
@@ -228,25 +267,27 @@ Phase 4), so they are part of building the MVP, not a follow-up.
 7. Two-phase **expiry (stop → grace → destroy + final backup)** (§5.3).
 8. Honest docs on **storage-quota softness** and **isolation level** (§4.1, §1.2).
 
-**Fast-follow (v1.1)** — item 9 was found *after* the MVP shipped (observed live
-while operating the system), not part of the original DR-1..8 set; the rest are
-unchanged from the original review.
-9. **Reconciler must check `RUNNING`, not just presence** (§2.5) — cheap (one
-   `status()` call per READY instance per tick) and closes a real false-positive:
-   today a stopped-but-labelled container reports as healthy indefinitely.
-10. **Off-host backup storage** (S3/MinIO) + restore verification job (§3.1, §3.3).
-11. **docker-socket-proxy** + rootless daemon + hardened container flags (§1.1, §1.2).
-12. Host-level **admission/backpressure** check (§4.2).
-13. Observability pack: health, `postgres_exporter`, backup/job metrics (§5.2).
+**Fast-follow (v1.1)** — items 9-11 were found *after* the MVP shipped (two while
+operating the system, one while building the [moving-parts model](moving-parts-model.md)),
+not part of the original DR-1..8 set. All three are now ✅ **fixed** (§2.5-2.7);
+kept here, struck through, so the roadmap's history stays visible rather than
+silently shrinking.
+9. ~~**Reconciler must check `RUNNING`, not just presence** (§2.5).~~ Fixed.
+10. ~~**Orphan-GC failure must not roll back unrelated drift repair** (§2.6).~~ Fixed.
+11. ~~**Synchronous credential/DB-user ops need a bounded retry** (§2.7).~~ Fixed.
+12. **Off-host backup storage** (S3/MinIO) + restore verification job (§3.1, §3.3).
+13. **docker-socket-proxy** + rootless daemon + hardened container flags (§1.1, §1.2).
+14. Host-level **admission/backpressure** check (§4.2).
+15. Observability pack: health, `postgres_exporter`, backup/job metrics (§5.2).
 
 **Roadmap (v2+)**
-14. **Kubernetes provisioner** behind the existing Protocol (the driver
+16. **Kubernetes provisioner** behind the existing Protocol (the driver
     abstraction is what makes this cheap — [ADR-002](adr/ADR-002-provisioner-driver-abstraction.md)).
-15. Shared **pgbouncer/SNI proxy** replacing port-per-instance, with TLS (§1.4).
-16. **PITR** via WAL archiving (`pgBackRest`/`wal-g`) (§3.2).
-17. Envelope encryption via Vault/KMS (§1.3).
-18. Real tenant isolation (per-team networks, gVisor/Kata, or VM-per-team) (§1.2).
-19. Multi-engine (MySQL) via a second driver; HA/replicas for tenant DBs.
+17. Shared **pgbouncer/SNI proxy** replacing port-per-instance, with TLS (§1.4).
+18. **PITR** via WAL archiving (`pgBackRest`/`wal-g`) (§3.2).
+19. Envelope encryption via Vault/KMS (§1.3).
+20. Real tenant isolation (per-team networks, gVisor/Kata, or VM-per-team) (§1.2).
+21. Multi-engine (MySQL) via a second driver; HA/replicas for tenant DBs.
 
 ---
 
@@ -259,8 +300,10 @@ keeping:
   downtime — the single best structural choice ([ADR-001](adr/ADR-001-control-plane-data-plane-split.md)).
 - **Desired-state + reconciler** instead of imperative do-it-now calls — makes
   the system crash-safe and self-healing ([ADR-003](adr/ADR-003-desired-state-reconciler.md)).
-  Self-healing today covers *missing* containers; §2.5 is the gap where a
-  *stopped-but-present* one still slips through.
+  Self-healing now covers both *missing* and *stopped-but-present* containers
+  (§2.5); the one gap that remains by design is `FAILED`, which requires a
+  manual `POST /retry` rather than auto-recovering (see
+  [moving-parts-model.md §C1](moving-parts-model.md#c1-instancestate-observed_state)).
 - **Provisioner Protocol** isolating Docker so a k8s driver is additive, not a
   rewrite ([ADR-002](adr/ADR-002-provisioner-driver-abstraction.md)).
 - **Patch = image swap on a persistent volume** — honest, simple, and correct

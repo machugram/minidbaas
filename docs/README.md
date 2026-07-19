@@ -12,6 +12,7 @@ architecture, then the requirements, then the decisions and their scrutiny.
 | [PRD.md](PRD.md) | Product Requirements — personas, user stories, FRs/NFRs, acceptance criteria |
 | [diagrams.md](diagrams.md) | Mermaid diagrams: context, components, sequences, state machine, ER model |
 | [design-review.md](design-review.md) | Adversarial review of the design + prioritized improvement roadmap |
+| [moving-parts-model.md](moving-parts-model.md) | Deterministic, code-verified model: dependency graph, per-operation sequence diagrams, exact state-transition sites, ER diagram from the ORM, scheduler tick map |
 
 ## Architecture Decision Records
 
@@ -33,6 +34,7 @@ Alternatives). Each records one contested decision and the roads not taken.
 - **BRD** says *why the business wants this*; **PRD** says *what the product must
   do*; **ARCHITECTURE** says *how it's built*; **ADRs** justify *specific
   choices*; **design-review** stress-tests all of it and sets the improvement
-  order.
+  order; **moving-parts-model** shows *what the code actually does*, verified
+  line-by-line, as a check against everything else drifting from reality.
 - The design review's roadmap (§7) is the backlog: items 1–8 are folded into the
-  MVP, 9–12 are fast-follows, 13+ are v2.
+  MVP, 9–15 are fast-follows (9–11 are ✅ fixed post-MVP findings), 16+ are v2.
