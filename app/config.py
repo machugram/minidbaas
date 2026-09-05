@@ -19,12 +19,18 @@ class Settings(BaseSettings):
     # the test-suite (locking clauses degrade gracefully there; see services/ports.py).
     database_url: str = "postgresql+psycopg://mdbaas:mdbaas@localhost:5432/mdbaas"
 
-    # Credential encryption key (Fernet, urlsafe-base64). Required in production;
-    # the tests inject a generated one via the env.
+    # Credential encryption KEK (Fernet, urlsafe-base64). Required in production;
+    # the tests inject a generated one via the env. Envelope encryption wraps a
+    # per-secret DEK with this key (design-review §1.3).
     credential_encryption_key: str = ""
+    # During KEK rotation: old key for decrypt-only; new encrypts use credential_encryption_key.
+    credential_encryption_key_previous: str = ""
 
     # Provisioner. base_url=None means "use the ambient DOCKER_HOST / default socket".
+    # In compose, point at docker-socket-proxy instead of the raw socket (DR §1.1).
     docker_base_url: str | None = None
+    # Attach each instance to an isolated bridge network per team (DR §1.2).
+    per_team_networks: bool = True
     pg_image_default: str = "postgres:16"
     # Only images on this allow-list may be provisioned or patched to.
     allowed_pg_images: list[str] = Field(
@@ -56,6 +62,12 @@ class Settings(BaseSettings):
     job_claim_timeout_seconds: int = 300
 
     api_prefix: str = "/v1"
+
+    # API hardening
+    cors_origins: list[str] = Field(default_factory=list)
+    rate_limit_requests: int = 100
+    rate_limit_window_seconds: int = 60
+    max_request_bytes: int = 1_048_576
 
     # Disabled by the test-suite so no BackgroundScheduler (and no Docker) spins up.
     enable_scheduler: bool = True

@@ -11,7 +11,9 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import JSONResponse
 
 from app import __version__
 from app.api import api_router
@@ -19,6 +21,8 @@ from app.bootstrap import ensure_seed
 from app.config import get_settings
 from app.db import init_db, session_scope
 from app.errors import AppError, app_error_handler
+from app.middleware import MaxBodySizeMiddleware, MetricsMiddleware, RateLimitMiddleware
+from app.observability import metrics_response, readiness
 
 log = logging.getLogger(__name__)
 
@@ -60,9 +64,40 @@ def create_app() -> FastAPI:
     app.add_exception_handler(AppError, app_error_handler)
     app.include_router(api_router, prefix=settings.api_prefix)
 
+    if settings.cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+    app.add_middleware(
+        RateLimitMiddleware,
+        max_requests=settings.rate_limit_requests,
+        window_seconds=settings.rate_limit_window_seconds,
+    )
+    app.add_middleware(MaxBodySizeMiddleware, max_bytes=settings.max_request_bytes)
+    # Outermost among our custom middlewares so it records final status codes
+    # (including 413/429 from the layers above after Starlette reverses add order).
+    app.add_middleware(MetricsMiddleware)
+
     @app.get("/health", tags=["meta"])
     def health() -> dict:
+        """Liveness probe — process is up."""
         return {"status": "ok", "version": __version__}
+
+    @app.get("/health/ready", tags=["meta"])
+    def health_ready(request: Request) -> JSONResponse:
+        """Readiness probe — metadata DB, Docker, and scheduler are reachable."""
+        body, status_code = readiness(request)
+        return JSONResponse(content=body, status_code=status_code)
+
+    @app.get("/metrics", tags=["meta"])
+    def metrics():
+        """Prometheus metrics (job queue depth, instance counts)."""
+        return metrics_response()
 
     return app
 

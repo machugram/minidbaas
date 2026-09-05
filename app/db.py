@@ -1,16 +1,16 @@
-"""Engine, session factory, and dev-time schema bootstrap.
+"""Engine, session factory, and schema bootstrap.
 
-Production uses Alembic migrations; ``init_db`` (create_all + port seeding) is a
-convenience for local/dev and the test-suite so ``docker-compose up`` yields a
-working system without a migrate step.
+Postgres (compose/prod) applies Alembic migrations. SQLite (tests) uses
+``create_all`` so the suite stays self-contained without a migrate step.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
@@ -22,6 +22,19 @@ _settings = get_settings()
 _connect_args = {"check_same_thread": False} if _settings.is_sqlite else {}
 engine = create_engine(_settings.database_url, pool_pre_ping=True, connect_args=_connect_args)
 SessionFactory = sessionmaker(bind=engine, expire_on_commit=False, class_=Session)
+
+_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _alembic_ini() -> Path:
+    """Locate alembic.ini in editable checkouts, compose/Docker (/srv), or CWD."""
+    for candidate in (Path.cwd() / "alembic.ini", Path("/srv/alembic.ini"), _ROOT / "alembic.ini"):
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        "alembic.ini not found (looked in cwd, /srv, and repo root). "
+        "Run from the project root or set the working directory to the image /srv."
+    )
 
 
 @contextmanager
@@ -47,8 +60,41 @@ def get_session() -> Iterator[Session]:
         session.close()
 
 
+def _run_alembic_upgrade() -> None:
+    from alembic import command
+    from alembic.config import Config
+
+    cfg = Config(str(_alembic_ini()))
+    cfg.set_main_option("sqlalchemy.url", _settings.database_url)
+    # Ensure script_location resolves even if CWD differs from ini dir.
+    cfg.set_main_option("script_location", str(_alembic_ini().parent / "migrations"))
+    command.upgrade(cfg, "head")
+
+
+def _stamp_alembic_head() -> None:
+    """Mark the DB as migrated when schema was created via create_all (SQLite tests)."""
+    from alembic import command
+    from alembic.config import Config
+
+    try:
+        ini = _alembic_ini()
+    except FileNotFoundError:
+        return
+    cfg = Config(str(ini))
+    cfg.set_main_option("sqlalchemy.url", _settings.database_url)
+    cfg.set_main_option("script_location", str(ini.parent / "migrations"))
+    command.stamp(cfg, "head")
+
+
 def init_db() -> None:
-    Base.metadata.create_all(engine)
+    if _settings.is_sqlite:
+        Base.metadata.create_all(engine)
+        # Avoid re-stamping every test reset when the version table already exists.
+        insp = inspect(engine)
+        if "alembic_version" not in insp.get_table_names():
+            _stamp_alembic_head()
+    else:
+        _run_alembic_upgrade()
     _seed_ports()
 
 

@@ -8,11 +8,14 @@ The control plane is a FastAPI service; tenant databases run as Docker container
 Design docs live in [`docs/`](docs/README.md); this README is how to run it.
 
 ```
-API (FastAPI) ──writes desired state──▶ Metadata DB (Postgres)
-      │                                        ▲
-      │ Docker SDK                             │ reconciler + scheduler
-      ▼                                        │
- pg-instance-1  pg-instance-2  …  (tenant Postgres containers)
+CLI / curl ──▶ FastAPI (routers → services)
+                    │ writes desired state + jobs
+                    ▼
+              Metadata DB ◀── APScheduler (worker · reconciler · reaper · backups)
+                    │
+              DockerProvisioner ──tcp──▶ docker-socket-proxy ──▶ host Docker
+                                              │
+                    mdbaas-pg-<id> · mdbaas-vol-<id> · (optional mdbaas-net-<team>)
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the control/data-plane split (ADR-001),
@@ -56,7 +59,9 @@ Interactive docs (web): http://localhost:8001/docs
 ### Terminal walkthrough — plain curl (no install needed)
 
 ```bash
-curl -s "$MDBAAS_API_URL/health"
+curl -s "$MDBAAS_API_URL/health"          # liveness
+curl -s "$MDBAAS_API_URL/health/ready"   # readiness (DB + Docker + scheduler)
+curl -s "$MDBAAS_API_URL/metrics"         # Prometheus metrics
 
 curl -s -X POST "$MDBAAS_API_URL/v1/teams" \
   -H "Authorization: Bearer $MDBAAS_API_KEY" -H "Content-Type: application/json" \
@@ -103,7 +108,7 @@ mdbaas instances delete <instance-id>           # async delete (final backup by 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install ".[dev]"
-pytest                # 13 tests, no Docker required
+pytest                # unit suite, no Docker required
 ```
 
 The suite uses a file-backed SQLite metadata DB and a `FakeProvisioner`, so it
@@ -115,7 +120,24 @@ during tests.
 
 All settings use the `MDBAAS_` prefix — see [`.env.example`](.env.example). The
 important ones: `MDBAAS_DATABASE_URL`, `MDBAAS_CREDENTIAL_ENCRYPTION_KEY`,
+`MDBAAS_DOCKER_BASE_URL` (points at `docker-socket-proxy` in compose),
 `MDBAAS_PG_IMAGE_DEFAULT`, and the `MDBAAS_PORT_RANGE_*` for the ADR-007 port pool.
+
+### Security & hardening
+
+- **Docker socket proxy** — compose runs `tecnativa/docker-socket-proxy` so the API
+  never mounts the raw socket (design-review §1.1).
+- **Per-team networks** — each team's instances attach to an isolated bridge network
+  (`MDBAAS_PER_TEAM_NETWORKS`, default `true`).
+- **Envelope encryption** — credentials use a per-secret DEK wrapped by the KEK;
+  set `MDBAAS_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS` during KEK rotation.
+- **API hardening** — rate limiting (`MDBAAS_RATE_LIMIT_*`), request size cap
+  (`MDBAAS_MAX_REQUEST_BYTES`), optional CORS (`MDBAAS_CORS_ORIGINS`), Prometheus
+  request counter (`mdbaas_http_requests_total`).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
 
 ## Status & limitations
 
