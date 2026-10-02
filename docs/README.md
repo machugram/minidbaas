@@ -13,6 +13,7 @@ architecture, then the requirements, then the decisions and their scrutiny.
 | [diagrams.md](diagrams.md) | Mermaid diagrams: context, components, sequences, state machine, ER model |
 | [design-review.md](design-review.md) | Adversarial review of the design + prioritized improvement roadmap |
 | [moving-parts-model.md](moving-parts-model.md) | Deterministic, code-verified model: dependency graph, per-operation sequence diagrams, exact state-transition sites, ER diagram from the ORM, scheduler tick map |
+| [system-design-walkthrough.md](system-design-walkthrough.md) | Interview-style narrative explanation — requirements → design → deep dives → trade-offs — for onboarding or interview prep |
 
 ## Architecture Decision Records
 
@@ -35,6 +36,8 @@ Alternatives). Each records one contested decision and the roads not taken.
   do*; **ARCHITECTURE** says *how it's built*; **ADRs** justify *specific
   choices*; **design-review** stress-tests all of it and sets the improvement
   order; **moving-parts-model** shows *what the code actually does*, verified
-  line-by-line, as a check against everything else drifting from reality.
+  line-by-line, as a check against everything else drifting from reality;
+  **system-design-walkthrough** ties all of the above into one narrative,
+  cross-linking rather than repeating — read that one first if you're new.
 - The design review's roadmap (§7) is the backlog: items 1–8 are folded into the
   MVP, 9–15 are fast-follows (9–11 are ✅ fixed post-MVP findings), 16+ are v2.
