@@ -1,59 +1,129 @@
 # Mini-DBaaS
 
-A self-service platform that provisions and manages **Postgres instances on
-demand** — create/delete/resize, managed roles, credential rotation, automated
-backups, patching, and TTL cleanup — with team-based multi-tenancy and quotas.
+Mini-DBaaS is a self-service control plane for Postgres. A FastAPI service
+lets a team create, resize, patch, back up, and expire database instances.
+Each instance is its own Docker container, with its own volume, port, and
+credentials. Teams, roles, and quotas live in the control plane.
 
-The control plane is a FastAPI service; tenant databases run as Docker containers.
-Design docs live in [`docs/`](docs/README.md); this README is how to run it.
+## Architecture
 
+The API writes **desired state** and returns. A worker and an in-process
+scheduler read that state from the metadata database and drive Docker until
+**observed state** matches. A restart picks up unfinished jobs, so a crashed
+provision does not leave the API holding a half-created container.
+
+```mermaid
+flowchart TB
+    client["Client or CLI"]
+    subgraph controlPlane ["Control plane"]
+        api["FastAPI"]
+        meta[("Metadata Postgres")]
+        workers["Reconciler and scheduler"]
+    end
+    subgraph dataPlane ["Data plane"]
+        instances["Tenant Postgres containers"]
+    end
+    client -->|REST| api
+    api -->|"writes desired state"| meta
+    workers -->|"reads jobs and state"| meta
+    workers -->|"Docker SDK"| instances
 ```
-API (FastAPI) ──writes desired state──▶ Metadata DB (Postgres)
-      │                                        ▲
-      │ Docker SDK                             │ reconciler + scheduler
-      ▼                                        │
- pg-instance-1  pg-instance-2  …  (tenant Postgres containers)
-```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the control/data-plane split (ADR-001),
-the desired-state reconciler (ADR-003), and the provisioner abstraction (ADR-002).
+Tenant containers are labelled `mdbaas.managed=true`, bound to `127.0.0.1` on
+a port from the configured range, and named from the instance id. The metadata
+database is a separate Postgres and is never one of those instances.
 
-## Layout
-
-| Path | What |
+| Path | Role |
 |---|---|
-| `app/api/` | HTTP routers (thin: validate, authenticate, delegate) |
-| `app/services/` | use-cases: enforce policy, write desired state, enqueue jobs |
-| `app/lifecycle/` | workers: job queue, reconciler, backups, reaper, scheduler |
-| `app/provisioner/` | the only code that talks to Docker (`docker_driver.py`) |
-| `app/models.py` | metadata schema (source of truth) |
-| `cli/` | thin HTTP client for demos |
-| `tests/` | pytest suite; runs Docker-free via a fake provisioner |
+| `app/api/` | HTTP: validate, authenticate, delegate |
+| `app/services/` | Policy, desired state, job enqueue |
+| `app/lifecycle/` | Job worker, reconciler, backups, expiry |
+| `app/provisioner/` | The only code that talks to Docker |
+| `cli/` | Thin HTTP client |
 
-## Run it (Docker)
+The split, the reconciler, and the provisioner interface are recorded in
+[ARCHITECTURE.md](ARCHITECTURE.md). Decision records are indexed in
+[docs/README.md](docs/README.md). State, schema, and deployment diagrams are
+in [docs/diagrams.md](docs/diagrams.md).
+
+## Create an instance
+
+`POST /v1/instances` checks the caller and the team quota, stores an encrypted
+superuser password, and enqueues a provision job. The response is `202` and
+includes that password once. The worker then creates the container and waits
+until Postgres accepts connections.
+
+```mermaid
+sequenceDiagram
+    actor Client
+    participant API
+    participant Meta as Metadata DB
+    participant Worker
+    participant Docker
+
+    Client->>API: POST /v1/instances
+    API->>API: auth and quota
+    API->>Meta: insert instance desired=ready, encrypt password, enqueue provision
+    API-->>Client: 202 and the one-time password
+    Worker->>Meta: claim the provision job
+    Worker->>Docker: create volume and container
+    Worker->>Docker: wait until pg_isready
+    Worker->>Meta: set observed=ready
+    Client->>API: GET /v1/instances/{id}
+    API-->>Client: observed=ready and connection info
+```
+
+## Back up an instance
+
+A manual backup runs in the request. The scheduler enqueues the same work for
+any ready instance whose last successful dump is older than the recovery-point
+target, then deletes dumps past the retention window. In both cases `pg_dump`
+runs inside the tenant container and writes a gzip file on the shared backups
+volume.
+
+```mermaid
+sequenceDiagram
+    actor Client
+    participant API
+    participant Sched as Scheduler
+    participant Meta as Metadata DB
+    participant Worker
+    participant Docker
+
+    alt manual
+        Client->>API: POST /v1/instances/{id}/backups
+        API->>Docker: pg_dump piped to gzip on /backups
+        API->>Meta: insert backup row status=ok
+    else scheduled
+        Sched->>Meta: find instances past the recovery-point target
+        Sched->>Meta: enqueue a backup job
+        Sched->>Docker: delete dump files past retention
+        Sched->>Meta: delete those backup rows
+        Worker->>Meta: claim the job
+        Worker->>Docker: pg_dump piped to gzip on /backups
+        Worker->>Meta: insert backup row status=ok
+    end
+```
+
+## Run
+
+Generate a Fernet key, then start the API and the metadata database:
 
 ```bash
-# 1. Generate the credential-encryption key (ADR-005)
 export MDBAAS_CREDENTIAL_ENCRYPTION_KEY=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
-
-# 2. Start the control plane (API + metadata Postgres)
 docker compose up --build
 ```
 
-The API is published on host port **8001** by default (`docker-compose.yml`). If
-that's taken, override it: `MDBAAS_HOST_PORT=8010 docker compose up --build`.
-
-On first start the API logs a one-time **bootstrap admin API key** — grab it:
+The API is published on host port **8001** (`MDBAAS_HOST_PORT` overrides it).
+On first start the API logs a bootstrap admin key:
 
 ```bash
 docker compose logs api | grep "bootstrap admin API key"
-export MDBAAS_API_KEY=mdb_...      # from the log line
+export MDBAAS_API_KEY=mdb_...
 export MDBAAS_API_URL=http://localhost:8001
 ```
 
-Interactive docs (web): http://localhost:8001/docs
-
-### Terminal walkthrough — plain curl (no install needed)
+Interactive docs: http://localhost:8001/docs
 
 ```bash
 curl -s "$MDBAAS_API_URL/health"
@@ -61,68 +131,51 @@ curl -s "$MDBAAS_API_URL/health"
 curl -s -X POST "$MDBAAS_API_URL/v1/teams" \
   -H "Authorization: Bearer $MDBAAS_API_KEY" -H "Content-Type: application/json" \
   -d '{"name":"acme"}'
-TEAM=<id-from-response>
 
 curl -s -X POST "$MDBAAS_API_URL/v1/instances" \
   -H "Authorization: Bearer $MDBAAS_API_KEY" -H "Content-Type: application/json" \
-  -d "{\"team_id\":\"$TEAM\",\"name\":\"app-db\",\"size\":\"small\"}"
-DB=<id-from-response>
-
-curl -s "$MDBAAS_API_URL/v1/instances/$DB/status" -H "Authorization: Bearer $MDBAAS_API_KEY"
-curl -s -X POST "$MDBAAS_API_URL/v1/instances/$DB/backups" -d '{}' \
-  -H "Authorization: Bearer $MDBAAS_API_KEY" -H "Content-Type: application/json"
-curl -s -X DELETE "$MDBAAS_API_URL/v1/instances/$DB" -H "Authorization: Bearer $MDBAAS_API_KEY"
+  -d '{"team_id":"<team-id>","name":"app-db","size":"small"}'
 ```
 
-### Optional: install the `mdbaas` CLI
-
-The CLI (`cli/mdbaas.py`) is a thinner wrapper over the same endpoints — install it
-if you'd rather type `mdbaas instances create ...` than curl:
+The `mdbaas` CLI calls the same API. Its default URL is port 8000, so point it
+at the Compose port:
 
 ```bash
-python3 -m venv .venv
-# cryptography/bcrypt ship as source sdists on some platforms without a matching
-# wheel; force prebuilt binaries to avoid needing a Rust/C toolchain.
-.venv/bin/pip install --only-binary=:all: cryptography bcrypt
-.venv/bin/pip install -e .
-source .venv/bin/activate
-```
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e .
+export MDBAAS_API_URL=http://localhost:8001
 
-```bash
 mdbaas health
 mdbaas teams create acme
 mdbaas instances create app-db --team <team-id> --size small
-mdbaas instances status <instance-id>          # poll until observed_state == ready
-mdbaas backups create <instance-id>             # manual backup (pg_dump)
-mdbaas instances rotate <instance-id>           # rotate superuser credential
-mdbaas instances delete <instance-id>           # async delete (final backup by default)
+mdbaas instances status <instance-id>
 ```
 
-## Develop & test
+## Develop
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install ".[dev]"
-pytest                # 13 tests, no Docker required
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+pytest
 ```
 
-The suite uses a file-backed SQLite metadata DB and a `FakeProvisioner`, so it
-exercises the real API, services, job queue, and reconciler without spinning up
-containers. `MDBAAS_ENABLE_SCHEDULER=false` keeps the background scheduler off
-during tests.
+Tests use a file-backed SQLite metadata database and a fake provisioner, so
+they exercise the API, services, job queue, and reconciler without Docker.
+`MDBAAS_ENABLE_SCHEDULER=false` keeps the background scheduler off.
 
 ## Configuration
 
-All settings use the `MDBAAS_` prefix — see [`.env.example`](.env.example). The
-important ones: `MDBAAS_DATABASE_URL`, `MDBAAS_CREDENTIAL_ENCRYPTION_KEY`,
-`MDBAAS_PG_IMAGE_DEFAULT`, and the `MDBAAS_PORT_RANGE_*` for the ADR-007 port pool.
+Settings use the `MDBAAS_` prefix. The ones you will set first:
 
-## Status & limitations
+| Variable | Purpose |
+|---|---|
+| `MDBAAS_DATABASE_URL` | Control-plane Postgres |
+| `MDBAAS_CREDENTIAL_ENCRYPTION_KEY` | Fernet key for stored passwords |
+| `MDBAAS_PG_IMAGE_DEFAULT` | Image used when a create omits one |
+| `MDBAAS_PORT_RANGE_START` / `MDBAAS_PORT_RANGE_END` | Host ports for tenant instances |
 
-This is an MVP. The correctness/security hardening from the
-[design review](docs/design-review.md) that is *cheap enough to do now* is built
-in — atomic port allocation, desired-state reconciliation, `SKIP LOCKED` job
-claiming, advisory-locked schedules, hashed API keys, idempotent create, two-phase
-expiry. The documented **accepted limitations** (soft storage quotas, on-host
-backups, port-per-instance, single-host scheduler) and the v1.1/v2 roadmap are in
-[design-review §6–7](docs/design-review.md#7-prioritized-improvement-roadmap).
+The full list is in [.env.example](.env.example).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
